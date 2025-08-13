@@ -1,22 +1,20 @@
 const PriceData = require('../models/price-data')
-const {calcCrossPrice} = require('../utils')
+const {calcCrossPrice, PRICE_SCALE} = require('../utils')
 const PriceProviderBase = require('./price-provider-base')
 
 const baseApiUrl = 'https://exchange-rates.abstractapi.com/v1'
 
 class AbstractApiProvider extends PriceProviderBase {
     constructor(apiKey, secret) {
-        super(apiKey, secret)
+        super('abstractapi', apiKey, secret)
     }
-
-    name = 'abstractapi'
 
     async __getTradeData(timestamp, timeout) {
         if (!this.apiKey) {
             throw new Error('API key is required for abstractapi')
         }
         const requestUrl = `${baseApiUrl}/live/?api_key=${this.apiKey}&base=USD`
-        const response = await this.__makeRequest(requestUrl, {timeout})
+        const response = await PriceProviderBase.makeRequest(requestUrl, {timeout})
         if (!response) {
             throw new Error('Failed to get data from abstractapi')
         }
@@ -26,7 +24,7 @@ class AbstractApiProvider extends PriceProviderBase {
                 source: this.name,
                 ts: timestamp
             })
-            acc[symbol].price = calcCrossPrice(acc[symbol].price, 10000000n)
+            acc[symbol].price = calcCrossPrice(acc[symbol].price, PRICE_SCALE)
             return acc
         }, {})
     }

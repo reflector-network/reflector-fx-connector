@@ -1,22 +1,20 @@
 const PriceData = require('../models/price-data')
-const {calcCrossPrice} = require('../utils')
+const {calcCrossPrice, PRICE_SCALE} = require('../utils')
 const PriceProviderBase = require('./price-provider-base')
 
 const baseApiUrl = 'https://api.fxratesapi.com'
 
 class FXRatesApiProvider extends PriceProviderBase {
     constructor(apiKey, secret) {
-        super(apiKey, secret)
+        super('fxratesapi', apiKey, secret)
     }
-
-    name = 'fxratesapi'
 
     async __getTradeData(timestamp, timeout) {
         if (!this.apiKey) {
             throw new Error('API key is required for fxratesapi')
         }
         const requestUrl = `${baseApiUrl}/latest?api_key=${this.apiKey}`
-        const response = await this.__makeRequest(requestUrl, {timeout})
+        const response = await PriceProviderBase.makeRequest(requestUrl, {timeout})
         if (!response?.data?.success) {
             throw new Error('Failed to get data from fxratesapi')
         }
@@ -26,7 +24,7 @@ class FXRatesApiProvider extends PriceProviderBase {
                 source: this.name,
                 ts: timestamp
             })
-            acc[symbol].price = calcCrossPrice(acc[symbol].price, 10000000n)
+            acc[symbol].price = calcCrossPrice(acc[symbol].price, PRICE_SCALE)
             return acc
         }, {})
     }

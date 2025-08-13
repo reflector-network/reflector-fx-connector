@@ -2,6 +2,9 @@
 const nock = require('nock')
 const {setGateway, getTradesData} = require('../src')
 const PriceProviderBase = require('../src/providers/price-provider-base')
+const NBPPriceProvider = require('../src/providers/nbp-provider')
+const ECBPriceProvider = require('../src/providers/ecb-provider')
+const ExchangerateApiProvider = require('../src/providers/exchangerate-api-provider')
 const {assets, getTimestamp} = require('./test-utils')
 
 const proxies = [
@@ -17,7 +20,7 @@ describe('index', () => {
 
     it('get prices', async () => {
         const sources = {
-            'apilayer': {apiKey: '22dfc689d2747a1c8dd8effd06f44771'},
+            'apilayer': {apiKey: 'mock'},
             'nbp': {},
             'ecb': {},
             'abstractapi': {apiKey: 'mock'},
@@ -25,6 +28,11 @@ describe('index', () => {
             'forexrateapi': {apiKey: 'mock'},
             'fxratesapi': {apiKey: 'mock'}
         }
+        //trigger cache loading
+        new NBPPriceProvider()
+        new ECBPriceProvider()
+        new ExchangerateApiProvider('mock')
+        await new Promise(resolve => setTimeout(resolve, 100))
         const tradesData = await getTradesData(assets, 'USD', timestamp, timeframe, count,
             {
                 batchSize: 5,
