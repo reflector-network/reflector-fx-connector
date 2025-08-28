@@ -61,11 +61,11 @@ async function runWorker(providerName, workerFn, api, secret, interval = 60 * 60
 
         const normalizedTs = normalizeTimestamp(Date.now(), interval)
         const cachedData = cache.get(providerName)
-        console.trace(`Running worker for ${providerName}. Cached data timestamp: ${cachedData?.timestamp}, current normalized timestamp: ${normalizedTs}`)
+        console.debug(`Running worker for ${providerName}. Cached data timestamp: ${cachedData?.timestamp}, current normalized timestamp: ${normalizedTs}`)
         if (cachedData && cachedData.timestamp === normalizedTs)
             return //data already cached for this timestamp
         const priceData = await workerFn(api, secret)
-        console.trace(`Worker for ${providerName} completed.`)
+        console.debug(`Worker for ${providerName} completed.`)
         //add to cache
         setCacheData(providerName, priceData, normalizedTs)
         timeout = normalizedTs + interval + syncDelay - Date.now()
