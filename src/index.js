@@ -108,56 +108,57 @@ async function fetchTradesData(provider, timestamp, timeout) {
     return []
 }
 
-/**
- * Gets aggregated prices from multiple providers
- * @param {string[]} assets - list of asset names
- * @param {string} baseAsset - base asset name
- * @param {number} timestamp - timestamp UNIX in seconds
- * @param {number} timeframe - timeframe in seconds
- * @param {number} count - number of candles to get before the timestamp
- * @param {FetchOptions} options - fetch options
- * @returns {Promise<AggregatedTradeData>}
- */
-async function getTradesData(assets, baseAsset, timestamp, timeframe, count, options = null) {
-    if (assets.length === 0)
-        return []
-    if (baseAsset !== 'USD')
-        throw new Error('Only USD base asset is supported')
-    if (timeframe % 60 !== 0) {
-        throw new Error('Timeframe should be whole minutes')
-    }
-    timeframe = timeframe / 60
-    if (timeframe > 60) {
-        throw new Error('Timeframe should be less than or equal to 60 minutes')
-    }
-
-    const { sources, timeout } = { ...defaultFetchOptions, ...options }
-
-    const fetchPromises = []
-    const providers = getSupportedProviders(sources)
-    const normalizedTradesTimestamp = timestamp + (timeframe * 60 * (count - 1))
-    for (const provider of providers) {
-        const providerTradesDataPromise = fetchTradesData(provider, normalizedTradesTimestamp, timeout)
-        fetchPromises.push(providerTradesDataPromise)
-    }
-    const providersResult = await Promise.all(fetchPromises)
-    const tradesData = Array.from({ length: count }, (i) => Array.from({ length: assets.length }, () => []))
-    for (let assetIndex = 0; assetIndex < assets.length; assetIndex++) {
-        const asset = assets[assetIndex]
-        for (let providerIndex = 0; providerIndex < providers.length; providerIndex++) {
-            const providerTradesData = providersResult[providerIndex]
-            const priceData = providerTradesData[asset]
-            if (!priceData)
-                continue
-            tradesData[count - 1][assetIndex].push(providerTradesData[asset])
+class ForexPriceProvider {
+    /**
+     * Gets aggregated prices from multiple providers
+     * @param {string[]} assets - list of asset names
+     * @param {string} baseAsset - base asset name
+     * @param {number} timestamp - timestamp UNIX in seconds
+     * @param {number} period - timeframe in seconds
+     * @param {number} count - number of candles to get before the timestamp
+     * @param {FetchOptions} options - fetch options
+     * @returns {Promise<AggregatedTradeData>}
+     */
+    async getPriceData({assets, baseAsset, timestamp, period, count, options = null}) {
+        if (assets.length === 0)
+            return []
+        if (baseAsset !== 'USD')
+            throw new Error('Only USD base asset is supported')
+        if (period % 60 !== 0) {
+            throw new Error('Timeframe should be whole minutes')
         }
+        period = period / 60
+        if (period > 60) {
+            throw new Error('Timeframe should be less than or equal to 60 minutes')
+        }
+
+        const { sources, timeout } = { ...defaultFetchOptions, ...options }
+
+        const fetchPromises = []
+        const providers = getSupportedProviders(sources)
+        const normalizedTradesTimestamp = timestamp + (period * 60 * (count - 1))
+        for (const provider of providers) {
+            const providerTradesDataPromise = fetchTradesData(provider, normalizedTradesTimestamp, timeout)
+            fetchPromises.push(providerTradesDataPromise)
+        }
+        const providersResult = await Promise.all(fetchPromises)
+        const tradesData = Array.from({ length: count }, (i) => Array.from({ length: assets.length }, () => []))
+        for (let assetIndex = 0; assetIndex < assets.length; assetIndex++) {
+            const asset = assets[assetIndex]
+            for (let providerIndex = 0; providerIndex < providers.length; providerIndex++) {
+                const providerTradesData = providersResult[providerIndex]
+                const priceData = providerTradesData[asset]
+                if (!priceData)
+                    continue
+                tradesData[count - 1][assetIndex].push(providerTradesData[asset])
+            }
+        }
+
+        return tradesData
     }
 
-    return tradesData
+    setGateway(gatewayOptions, gatewayValidationKey, useCurrentProvider = false) {
+        PriceProviderBase.setGateway(gatewayOptions, gatewayValidationKey, useCurrentProvider)
+    }
 }
-
-function setGateway(gatewayOptions, gatewayValidationKey, useCurrentProvider = false) {
-    PriceProviderBase.setGateway(gatewayOptions, gatewayValidationKey, useCurrentProvider)
-}
-
-module.exports = { getTradesData, setGateway }
+module.exports = ForexPriceProvider

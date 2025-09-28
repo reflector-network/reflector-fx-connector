@@ -1,6 +1,6 @@
 /*eslint-disable no-undef */
 const nock = require('nock')
-const {setGateway, getTradesData} = require('../src')
+const ForexPriceProvider = require('../src')
 const PriceProviderBase = require('../src/providers/price-provider-base')
 const NBPPriceProvider = require('../src/providers/nbp-provider')
 const ECBPriceProvider = require('../src/providers/ecb-provider')
@@ -33,13 +33,20 @@ describe('index', () => {
         new ECBPriceProvider()
         new ExchangerateApiProvider('mock')
         await new Promise(resolve => setTimeout(resolve, 100))
-        const tradesData = await getTradesData(assets, 'USD', timestamp, timeframe, count,
-            {
+        const provider = new ForexPriceProvider()
+        const tradesData = await provider.getPriceData({
+            assets,
+            baseAsset:'USD',
+            from: timestamp,
+            period: timeframe,
+            count,
+            options: {
                 batchSize: 5,
                 batchDelay: 1000,
                 timeout: 15000,
                 sources
-            })
+            }
+        })
         expect(tradesData.length).toBe(count)
         expect(tradesData[tradesData.length - 1].length).toBe(assets.length)
         expect(tradesData[tradesData.length - 1][0].length).toBe(Object.entries(sources).length)
@@ -47,9 +54,10 @@ describe('index', () => {
 
 
     it('set gateway', () => {
-        setGateway(proxies, true)
+        const provider = new ForexPriceProvider()
+        provider.setGateway(proxies, true)
         expect(PriceProviderBase.gatewayUrls.length).toBe(proxies.length)
-        setGateway(null)
+        provider.setGateway(null)
         expect(PriceProviderBase.gatewayUrls).toBeNull()
     }, 30000)
 
