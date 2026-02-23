@@ -1,10 +1,12 @@
+const {DECIMALS} = require('../utils')
+
 /**
  * Convert arbitrary stringified amount to int64 representation
  * @param {string|number} value - amount to convert
  * @param {number} decimals - number of decimal places
  * @return {BigInt}
  */
-function priceToBigInt(value, decimals = 7) {
+function priceToBigInt(value, decimals = DECIMALS) {
     if (!value)
         return 0n
     if (typeof value === 'number') {

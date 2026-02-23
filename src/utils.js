@@ -1,3 +1,6 @@
+const DECIMALS = 14
+const PRICE_SCALE = 10n ** BigInt(DECIMALS)
+
 /**
  * Calculate cross price
  * @param {BigInt} basePrice - base price in BigInt
@@ -5,7 +8,9 @@
  * @returns {BigInt} - cross price in BigInt
  */
 function calcCrossPrice(basePrice, price) {
-    return (price * (10n ** BigInt(7))) / basePrice
+    if (basePrice === 0n || price === 0n)
+        return 0n
+    return (price * PRICE_SCALE) / basePrice
 }
 
 /**
@@ -20,5 +25,7 @@ function normalizeTimestamp(timestamp, timeframe) {
 
 module.exports = {
     calcCrossPrice,
-    normalizeTimestamp
+    normalizeTimestamp,
+    DECIMALS,
+    PRICE_SCALE
 }

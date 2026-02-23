@@ -1,6 +1,6 @@
 {
   "name": "@reflector/fx-connector",
-  "version": "1.0.0",
+  "version": "2.0.0-rc4",
   "private": true,
   "description": "Foreign exchange rates data source for Reflector backend",
   "main": "src/index.js",
@@ -10,7 +10,7 @@
   "author": "team@stellar.expert",
   "license": "MIT",
   "dependencies": {
-    "axios": "^1.6.8"
+    "axios": ">=1"
   },
   "devDependencies": {
     "@stellar-expert/eslint-config-js": "github:stellar-expert/eslint-config-js",

@@ -3,6 +3,7 @@ const https = require('https')
 const http = require('http')
 const {default: axios} = require('axios')
 const PriceData = require('../models/price-data')
+const {normalizeTimestamp} = require('../utils')
 
 const defaultAgentOptions = {keepAlive: true, maxSockets: 50, noDelay: true}
 
@@ -20,45 +21,85 @@ function getRotatedIndex(index, length) {
 
 const cache = new Map()
 
-function ensureCache(providerName) {
-    let providerCache = cache.get(providerName)
-    if (!providerCache) {
-        providerCache = new Map()
-        cache.set(providerName, providerCache)
+function setCacheData(providerName, priceData, timestamp) {
+    if (!providerName || !priceData || typeof timestamp !== 'number' || timestamp < 0)
+        throw new Error('Invalid parameters for setCacheData')
+    cache.set(providerName, {priceData, timestamp})
+}
+
+function tryGetCachedData(providerName, timestamp) {
+    const cachedData = cache.get(providerName)
+    if (!cachedData)
+        return
+    //clone and update timestamp
+    return Object.entries(cachedData?.priceData || {}).reduce((acc, [symbol, priceData]) => {
+        acc[symbol] = new PriceData({
+            price: priceData.price,
+            source: priceData.source,
+            ts: timestamp
+        })
+        return acc
+    }, {})
+}
+/**
+ * delay in milliseconds for syncing price data
+ */
+const syncDelay = 5 * 1000
+
+/**
+ * Run a worker function periodically to load price data and cache it.
+ * @param {string} providerName - Name of the provider
+ * @param {Function} workerFn - Function to run periodically to load price data
+ * @param {string} api - API key for the provider
+ * @param {string} secret - Secret key for the provider
+ * @param {number} [interval] - Timeout in milliseconds for the worker function. Defaults to 1 hour.
+ * @returns {Promise<void>}
+ */
+async function runWorker(providerName, workerFn, api, secret, interval = 60 * 60 * 1000) {
+    let timeout
+    try {
+
+        const normalizedTs = normalizeTimestamp(Date.now(), interval)
+        const cachedData = cache.get(providerName)
+        console.debug(`Running worker for ${providerName}. Cached data timestamp: ${cachedData?.timestamp}, current normalized timestamp: ${normalizedTs}`)
+        if (cachedData && cachedData.timestamp === normalizedTs)
+            return //data already cached for this timestamp
+        const priceData = await workerFn(api, secret)
+        console.debug(`Worker for ${providerName} completed.`)
+        //add to cache
+        setCacheData(providerName, priceData, normalizedTs)
+        timeout = normalizedTs + interval + syncDelay - Date.now()
+    } catch (err) {
+        console.error({err}, `Error getting trade data from ${providerName}`)
+        timeout = 60 * 1000 //retry in 1 minute
+    } finally {
+        setTimeout(() => {
+            runWorker(providerName, workerFn, api, secret, interval)
+        }, timeout)
     }
-    return providerCache
 }
 
 class PriceProviderBase {
-    constructor(apiKey, secret) {
+    /**
+     * @param {string} name - Name of the provider
+     * @param {string} apiKey - API key for the provider
+     * @param {string} secret - Secret key for the provider
+     * @param {{loadPriceDataFn: Function, interval: [number]}} [cacheWorkerOptions] - Optional cache worker for background tasks
+     */
+    constructor(name, apiKey, secret, cacheWorkerOptions) {
         if (this.constructor === PriceProviderBase)
             throw new Error('PriceProviderBase is an abstract class and cannot be instantiated')
+        this.name = name
         this.apiKey = apiKey
         this.secret = secret
-    }
-
-    __setCacheData(key, value) {
-        ensureCache(this.name).set(key, value)
-    }
-
-    __clearCache() {
-        ensureCache(this.name).clear()
-    }
-
-    //get cloned cached data with updated timestamp, if available
-    __tryGetCachedData(key, timestamp) {
-        const cachedData = ensureCache(this.name).get(key)
-        if (!cachedData)
-            return null
-        //clone and update timestamp
-        return Object.entries(cachedData).reduce((acc, [symbol, priceData]) => {
-            acc[symbol] = new PriceData({
-                price: priceData.price,
-                source: priceData.source,
-                ts: timestamp
-            })
-            return acc
-        }, {})
+        if (cacheWorkerOptions) {
+            if (cache.has(this.name))
+                return //worker already running
+            //initialize cache
+            setCacheData(this.name, {}, 0)
+            //run worker to load price data
+            runWorker(this.name, cacheWorkerOptions.loadPriceDataFn, this.apiKey, this.secret, cacheWorkerOptions.interval)
+        }
     }
 
     static setGateway(gatewayConnectionSting, validationKey, useCurrentProvider) {
@@ -137,6 +178,9 @@ class PriceProviderBase {
     getTradesData(timestamp, timeout = 3000) {
         if (typeof timestamp !== 'number' || timestamp <= 0)
             throw new Error('Invalid timestamp')
+        const priceData = tryGetCachedData(this.name, timestamp, this.apiKey, this.secret)
+        if (priceData)
+            return Promise.resolve(priceData)
         return this.__getTradeData(timestamp, timeout)
     }
 
@@ -155,9 +199,9 @@ class PriceProviderBase {
      * @param {string} url - request url
      * @param {any} [options] - request options
      * @returns {Promise<any>}
-     * @protected
+     * @static
      */
-    async __makeRequest(url, options = {}) {
+    static async makeRequest(url, options = {}) {
         const gatewayUrl = PriceProviderBase.getGatewayUrl(url)
         if (gatewayUrl) {
             url = `${gatewayUrl}/gateway?url=${encodeURIComponent(url)}`

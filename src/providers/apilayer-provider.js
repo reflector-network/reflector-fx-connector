@@ -1,5 +1,5 @@
 const PriceData = require('../models/price-data')
-const {calcCrossPrice} = require('../utils')
+const {calcCrossPrice, PRICE_SCALE} = require('../utils')
 const PriceProviderBase = require('./price-provider-base')
 
 const baseApiUrl = 'https://apilayer.net/api'
@@ -8,17 +8,15 @@ const base = 'USD'
 
 class ApiLayerProvider extends PriceProviderBase {
     constructor(apiKey, secret) {
-        super(apiKey, secret)
+        super('apilayer', apiKey, secret)
     }
-
-    name = 'apilayer'
 
     async __getTradeData(timestamp, timeout) {
         if (!this.apiKey) {
             throw new Error('API key is required for apilayer')
         }
         const requestUrl = `${baseApiUrl}/live?access_key=${this.apiKey}&source=USD&format=1`
-        const response = await this.__makeRequest(requestUrl, {timeout})
+        const response = await PriceProviderBase.makeRequest(requestUrl, {timeout})
         if (!response?.data?.success) {
             throw new Error('Failed to get data from apilayer')
         }
@@ -29,7 +27,7 @@ class ApiLayerProvider extends PriceProviderBase {
                 source: this.name,
                 ts: timestamp
             })
-            acc[currentSymbol].price = calcCrossPrice(acc[currentSymbol].price, 10000000n)
+            acc[currentSymbol].price = calcCrossPrice(acc[currentSymbol].price, PRICE_SCALE)
             return acc
         }, {})
     }
