@@ -1,6 +1,6 @@
 {
   "name": "@reflector/fx-connector",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "description": "Foreign exchange rates data source for Reflector backend",
   "main": "src/index.js",

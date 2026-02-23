@@ -49,7 +49,7 @@ describe('index', () => {
         })
         expect(tradesData.length).toBe(count)
         expect(tradesData[tradesData.length - 1].length).toBe(assets.length)
-        expect(tradesData[tradesData.length - 1][0].length).toBe(Object.entries(sources).length)
+        expect(tradesData[tradesData.length - 1][0].length).toBe(Object.entries(sources).length - 1) //fxratesapi is no longer supported
     }, 30000)
 
 
