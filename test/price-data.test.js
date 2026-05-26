@@ -44,9 +44,12 @@ describe('PriceData', () => {
         expect(plain.type).toBeUndefined()
     })
 
-    it('handles zero/empty price as zero volume', () => {
+    it('zero/empty price emits {volume: 0, quoteVolume: 0} as a no-data slot', () => {
         const pd = new PriceData({price: 0, source: 'test', ts: 0})
         expect(pd.volume).toBe(0n)
+        expect(pd.quoteVolume).toBe(0n)
+        //toPlainObject mirrors the wire format
+        expect(pd.toPlainObject()).toEqual({volume: 0n, quoteVolume: 0n, source: 'test'})
     })
 
     it('calcCrossPrice(usdPrice, PRICE_SCALE) inverts the rate as expected', () => {

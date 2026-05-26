@@ -35,7 +35,10 @@ class PriceData {
         const {price, source, ts} = raw
         const p = typeof price === 'bigint' ? price : priceToBigInt(price)
         this.volume = p              //= price scaled to 14 decimals
-        this.quoteVolume = PRICE_SCALE //= 10^14, synthetic denominator so VWAP recovers the price
+        //synthetic denominator so getVWAP(volume, quoteVolume, 14) = price.
+        //emit {0, 0} for no-data slots so downstream aggregators can skip them
+        //(matches the convention used by exchanges/stellar connectors).
+        this.quoteVolume = p === 0n ? 0n : PRICE_SCALE
         this.source = source
         this.ts = ts                 //kept for debugging only, stripped from toPlainObject
     }
