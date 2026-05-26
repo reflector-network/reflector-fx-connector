@@ -20,6 +20,8 @@ function getRotatedIndex(index, length) {
 }
 
 const cache = new Map()
+const timeoutHandles = new Map()
+const disposedProviders = new Set()
 
 function setCacheData(providerName, priceData, timestamp) {
     if (!providerName || !priceData || typeof timestamp !== 'number' || timestamp < 0)
@@ -34,7 +36,7 @@ function tryGetCachedData(providerName, timestamp) {
     //clone and update timestamp
     return Object.entries(cachedData?.priceData || {}).reduce((acc, [symbol, priceData]) => {
         acc[symbol] = new PriceData({
-            price: priceData.price,
+            price: priceData.volume,
             source: priceData.source,
             ts: timestamp
         })
@@ -56,26 +58,36 @@ const syncDelay = 5 * 1000
  * @returns {Promise<void>}
  */
 async function runWorker(providerName, workerFn, api, secret, interval = 60 * 60 * 1000) {
+    if (disposedProviders.has(providerName))
+        return
     let timeout
     try {
 
         const normalizedTs = normalizeTimestamp(Date.now(), interval)
         const cachedData = cache.get(providerName)
-        console.debug(`Running worker for ${providerName}. Cached data timestamp: ${cachedData?.timestamp}, current normalized timestamp: ${normalizedTs}`)
-        if (cachedData && cachedData.timestamp === normalizedTs)
+        console.debug({msg: 'Running cache worker', provider: providerName, cachedTimestamp: cachedData?.timestamp, normalizedTs})
+        if (cachedData && cachedData.timestamp === normalizedTs) {
+            //assign timeout before returning; otherwise the finally below schedules at 0ms and busy-loops
+            timeout = Math.max(normalizedTs + interval + syncDelay - Date.now(), 1000)
             return //data already cached for this timestamp
+        }
         const priceData = await workerFn(api, secret)
-        console.debug(`Worker for ${providerName} completed.`)
+        if (disposedProviders.has(providerName))
+            return //disposed during fetch
+        console.debug({msg: 'Cache worker completed', provider: providerName})
         //add to cache
         setCacheData(providerName, priceData, normalizedTs)
-        timeout = normalizedTs + interval + syncDelay - Date.now()
+        timeout = Math.max(normalizedTs + interval + syncDelay - Date.now(), 1000)
     } catch (err) {
-        console.error({err}, `Error getting trade data from ${providerName}`)
+        console.error({msg: 'Error getting trade data', provider: providerName, err})
         timeout = 60 * 1000 //retry in 1 minute
     } finally {
-        setTimeout(() => {
-            runWorker(providerName, workerFn, api, secret, interval)
-        }, timeout)
+        if (!disposedProviders.has(providerName)) {
+            const handle = setTimeout(() => {
+                runWorker(providerName, workerFn, api, secret, interval)
+            }, timeout)
+            timeoutHandles.set(providerName, handle)
+        }
     }
 }
 
@@ -93,13 +105,39 @@ class PriceProviderBase {
         this.apiKey = apiKey
         this.secret = secret
         if (cacheWorkerOptions) {
-            if (cache.has(this.name))
+            if (cache.has(this.name) && !disposedProviders.has(this.name))
                 return //worker already running
+            //clear any prior disposed state so the worker restarts on re-construction
+            disposedProviders.delete(this.name)
             //initialize cache
             setCacheData(this.name, {}, 0)
             //run worker to load price data
             runWorker(this.name, cacheWorkerOptions.loadPriceDataFn, this.apiKey, this.secret, cacheWorkerOptions.interval)
         }
+    }
+
+    /**
+     * Stop the cache worker for this provider and clear its pending timer.
+     * The last-fetched cache entry is retained so getTradesData can still serve it.
+     */
+    dispose() {
+        disposedProviders.add(this.name)
+        const handle = timeoutHandles.get(this.name)
+        if (handle) {
+            clearTimeout(handle)
+            timeoutHandles.delete(this.name)
+        }
+    }
+
+    /**
+     * Stop all cache workers and clear all pending timers. Mainly useful for test teardown.
+     */
+    static disposeAll() {
+        for (const [providerName, handle] of timeoutHandles) {
+            clearTimeout(handle)
+            disposedProviders.add(providerName)
+        }
+        timeoutHandles.clear()
     }
 
     static setGateway(gatewayConnectionSting, validationKey, useCurrentProvider) {
@@ -223,10 +261,10 @@ class PriceProviderBase {
             const time = Date.now() - start
             requestedUrls.delete(url)
             if (time > 1000)
-                console.debug(`Request to ${url} took ${time}ms. Gateway: ${gatewayUrl ? gatewayUrl : 'no'}`)
+                console.debug({msg: 'Slow request', url, durationMs: time, gateway: gatewayUrl ?? null})
             return response
         } catch (err) {
-            console.error(`Request to ${url} failed: ${err.message}. Gateway: ${gatewayUrl ? gatewayUrl : 'no'}`)
+            console.warn({msg: 'Request failed', url, gateway: gatewayUrl ?? null, err})
             return null
         }
     }

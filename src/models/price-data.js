@@ -1,4 +1,4 @@
-const {DECIMALS} = require('../utils')
+const {DECIMALS, PRICE_SCALE} = require('../utils')
 
 /**
  * Convert arbitrary stringified amount to int64 representation
@@ -29,22 +29,28 @@ function priceToBigInt(value, decimals = DECIMALS) {
 
 class PriceData {
     /**
-     *
      * @param {{price: (number|string|BigInt), source: string, ts: number}} raw - raw data
      */
     constructor(raw) {
-        const {price, source} = raw
-        this.price = typeof price === 'bigint' ? price : priceToBigInt(price)
+        const {price, source, ts} = raw
+        const p = typeof price === 'bigint' ? price : priceToBigInt(price)
+        this.volume = p              //= price scaled to 14 decimals
+        this.quoteVolume = PRICE_SCALE //= 10^14, synthetic denominator so VWAP recovers the price
         this.source = source
-        this.ts = raw.ts
-        this.type = 'price'
+        this.ts = ts                 //kept for debugging only, stripped from toPlainObject
     }
 
     /**
      * @type {BigInt}
      * @readonly
      */
-    price
+    volume
+
+    /**
+     * @type {BigInt}
+     * @readonly
+     */
+    quoteVolume
 
     /**
      * @type {string}
@@ -53,17 +59,17 @@ class PriceData {
     source
 
     toJSON() {
-        return JSON.stringify(this.toPlainObject())
+        return this.toPlainObject()
     }
 
     toPlainObject() {
         return {
-            price: this.price,
-            type: this.type,
-            //ts: this.ts,
+            volume: this.volume,
+            quoteVolume: this.quoteVolume,
             source: this.source
         }
     }
 }
 
 module.exports = PriceData
+module.exports.priceToBigInt = priceToBigInt

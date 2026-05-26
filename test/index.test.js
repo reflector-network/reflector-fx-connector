@@ -18,6 +18,10 @@ describe('index', () => {
     const count = 100
     const timestamp = getTimestamp() - (timeframe * count)
 
+    afterAll(() => {
+        PriceProviderBase.disposeAll()
+    })
+
     it('get prices', async () => {
         const sources = {
             'apilayer': {apiKey: 'mock'},

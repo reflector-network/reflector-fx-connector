@@ -1,14 +1,15 @@
 const PriceData = require('../models/price-data')
+const {priceToBigInt} = PriceData
 const {calcCrossPrice, PRICE_SCALE} = require('../utils')
 const PriceProviderBase = require('./price-provider-base')
 
 const baseApiUrl = 'https://apilayer.net/api'
-
 const base = 'USD'
+const APILAYER_NAME = 'apilayer'
 
 class ApiLayerProvider extends PriceProviderBase {
     constructor(apiKey, secret) {
-        super('apilayer', apiKey, secret)
+        super(APILAYER_NAME, apiKey, secret)
     }
 
     async __getTradeData(timestamp, timeout) {
@@ -22,12 +23,9 @@ class ApiLayerProvider extends PriceProviderBase {
         }
         return Object.keys(response.data.quotes).reduce((acc, symbol) => {
             const currentSymbol = symbol.substring(base.length)
-            acc[currentSymbol] = new PriceData({
-                price: response.data.quotes[symbol],
-                source: this.name,
-                ts: timestamp
-            })
-            acc[currentSymbol].price = calcCrossPrice(acc[currentSymbol].price, PRICE_SCALE)
+            const rawPrice = priceToBigInt(response.data.quotes[symbol])
+            const finalPrice = calcCrossPrice(rawPrice, PRICE_SCALE)
+            acc[currentSymbol] = new PriceData({price: finalPrice, source: this.name, ts: timestamp})
             return acc
         }, {})
     }

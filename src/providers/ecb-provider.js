@@ -1,4 +1,5 @@
 const PriceData = require('../models/price-data')
+const {priceToBigInt} = PriceData
 const {calcCrossPrice, PRICE_SCALE} = require('../utils')
 const PriceProviderBase = require('./price-provider-base')
 
@@ -22,32 +23,33 @@ async function loadData() {
     const prices = data?.dataSets?.[0]?.series
     if (!prices)
         throw new Error('Failed to get data from ecb')
-    const priceData = {}
+
+    //first pass: collect raw BigInt rates (currency-per-EUR scaled to 14 dec)
+    const rawRates = {}
     for (let i = 0; i < currencies.length; i++) {
         const currency = currencies[i]
         const observations = prices[`0:${i}:0:0:0`]?.observations
         const observKey = Object.keys(observations)?.[0]
-        priceData[currency.id] = new PriceData({
-            price: observations[observKey]?.[0] ?? 0,
-            source: ECB_NAME,
-            ts: 0
-        })
+        rawRates[currency.id] = priceToBigInt(observations[observKey]?.[0] ?? 0)
     }
-    if (!priceData.USD)
+    if (!rawRates.USD)
         throw new Error('USD rate not found')
 
-    const usdPrice = priceData.USD.price
-    delete priceData.USD //remove USD rate
-    //convert all rates to USD
-    for (const symbol of Object.keys(priceData)) {
-        priceData[symbol].price = priceData[symbol].price ? calcCrossPrice(priceData[symbol].price, usdPrice) : 0n
+    const usdPrice = rawRates.USD
+    delete rawRates.USD
+
+    //second pass: convert each rate to USD via cross-price; add EUR
+    const finalRates = {}
+    for (const symbol of Object.keys(rawRates)) {
+        finalRates[symbol] = rawRates[symbol] ? calcCrossPrice(rawRates[symbol], usdPrice) : 0n
     }
-    //add EUR rate
-    priceData.EUR = new PriceData({
-        price: calcCrossPrice(PRICE_SCALE, usdPrice),
-        source: ECB_NAME,
-        ts: 0
-    })
+    finalRates.EUR = calcCrossPrice(PRICE_SCALE, usdPrice)
+
+    //third pass: construct PriceData once per symbol
+    const priceData = {}
+    for (const [symbol, price] of Object.entries(finalRates)) {
+        priceData[symbol] = new PriceData({price, source: ECB_NAME, ts: 0})
+    }
     return priceData
 }
 

@@ -34,12 +34,13 @@ const PriceProviderBase = require('./providers/price-provider-base')
  * @property {number} [timeout] - request timeout
  */
 
-const defaultFetchOptions = { sources: {'npb': {}, 'ecb': {}} } //two that don't require an API key
+const defaultFetchOptions = { sources: {'nbp': {}, 'ecb': {}} } //two that don't require an API key
 
 /**
  * @typedef {Object} PriceData
- * @property {BigInt} price
- * @property {string[]} sources
+ * @property {BigInt} volume - price scaled to 14 decimals
+ * @property {BigInt} quoteVolume - synthetic denominator (10^14) so downstream VWAP recovers the price
+ * @property {string} source
  */
 
 /**
@@ -69,7 +70,7 @@ function getSupportedProviders(sources) {
                 providers.push(new ForexRateApiProvider(sources[source].apiKey, sources[source].secret))
                 break
             default:
-                console.warn(`Unknown source: ${source}`)
+                console.warn({msg: 'Unknown source', source})
         }
     }
     return providers
@@ -89,7 +90,7 @@ async function fetchTradesData(provider, timestamp, timeout) {
         try {
             const tradesData = await provider.getTradesData(timestamp, timeout)
             if (!tradesData) {
-                console.debug(`No data from ${provider.name}`)
+                console.debug({msg: 'No data from provider', provider: provider.name})
                 break
             }
             return tradesData
@@ -100,7 +101,7 @@ async function fetchTradesData(provider, timestamp, timeout) {
         }
     }
     if (errors.length > 0)
-        console.warn(`Failed to get data from ${provider.name}: ${errors.join(', ')}`)
+        console.warn({msg: 'Failed to get data from provider', provider: provider.name, errors})
     return []
 }
 
@@ -155,6 +156,10 @@ class ForexPriceProvider {
 
     setGateway(gatewayOptions, gatewayValidationKey, useCurrentProvider = false) {
         PriceProviderBase.setGateway(gatewayOptions, gatewayValidationKey, useCurrentProvider)
+    }
+
+    dispose() {
+        PriceProviderBase.disposeAll()
     }
 }
 module.exports = ForexPriceProvider

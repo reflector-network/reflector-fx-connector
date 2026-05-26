@@ -24,9 +24,10 @@ async function getPriceTest(provider, source, count, expectNull = false) {
     }
     expect(tradesData.length).toBe(count)
     const lastTrade = tradesData[tradesData.length - 1]
-    const price = (lastTrade.quoteVolume === 0n || lastTrade.volume === 0n)
+    //mirror reflector-node's getVWAP convention: volume * 10^decimals / quoteVolume
+    const price = (lastTrade.volume === 0n || lastTrade.quoteVolume === 0n)
         ? 0n
-        : (lastTrade.quoteVolume * (10n ** BigInt(7 * 2))) / lastTrade.volume  //10^7 is the default precision
+        : (lastTrade.volume * (10n ** 14n)) / lastTrade.quoteVolume
     expect(price).toBeGreaterThan(0n)
 
     return price

@@ -1,4 +1,5 @@
 const PriceData = require('../models/price-data')
+const {priceToBigInt} = PriceData
 const {calcCrossPrice, PRICE_SCALE} = require('../utils')
 const PriceProviderBase = require('./price-provider-base')
 
@@ -19,12 +20,9 @@ class AbstractApiProvider extends PriceProviderBase {
             throw new Error('Failed to get data from abstractapi')
         }
         return Object.keys(response.data.exchange_rates).reduce((acc, symbol) => {
-            acc[symbol] = new PriceData({
-                price: response.data.exchange_rates[symbol],
-                source: this.name,
-                ts: timestamp
-            })
-            acc[symbol].price = calcCrossPrice(acc[symbol].price, PRICE_SCALE)
+            const rawPrice = priceToBigInt(response.data.exchange_rates[symbol])
+            const finalPrice = calcCrossPrice(rawPrice, PRICE_SCALE)
+            acc[symbol] = new PriceData({price: finalPrice, source: this.name, ts: timestamp})
             return acc
         }, {})
     }

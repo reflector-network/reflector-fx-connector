@@ -1,4 +1,5 @@
 const PriceData = require('../models/price-data')
+const {priceToBigInt} = PriceData
 const {calcCrossPrice, PRICE_SCALE} = require('../utils')
 const PriceProviderBase = require('./price-provider-base')
 
@@ -15,12 +16,9 @@ async function loadData(apiKey) {
         throw new Error('Failed to get data from exchangerate')
     }
     const data = Object.keys(response.data.conversion_rates).reduce((acc, symbol) => {
-        acc[symbol] = new PriceData({
-            price: response.data.conversion_rates[symbol],
-            source: EXCHANGERATE_NAME,
-            ts: 0
-        })
-        acc[symbol].price = calcCrossPrice(acc[symbol].price, PRICE_SCALE)
+        const rawPrice = priceToBigInt(response.data.conversion_rates[symbol])
+        const finalPrice = calcCrossPrice(rawPrice, PRICE_SCALE)
+        acc[symbol] = new PriceData({price: finalPrice, source: EXCHANGERATE_NAME, ts: 0})
         return acc
     }, {})
 
@@ -28,6 +26,7 @@ async function loadData(apiKey) {
 }
 
 const baseApiUrl = 'https://v6.exchangerate-api.com/v6/'
+
 class ExchangerateApiProvider extends PriceProviderBase {
     constructor(apiKey, secret) {
         super(EXCHANGERATE_NAME, apiKey, secret, {loadPriceDataFn: loadData, interval: 60 * 5 * 1000})

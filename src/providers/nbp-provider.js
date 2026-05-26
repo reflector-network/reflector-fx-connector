@@ -1,4 +1,5 @@
 const PriceData = require('../models/price-data')
+const {priceToBigInt} = PriceData
 const {calcCrossPrice, PRICE_SCALE} = require('../utils')
 const PriceProviderBase = require('./price-provider-base')
 
@@ -10,49 +11,45 @@ async function loadData() {
     const requestUrls = [`${baseApiUrl}/exchangerates/tables/A/?format=json`, `${baseApiUrl}/exchangerates/tables/B/?format=json`, `${baseApiUrl}/cenyzlota?format=json`]
     const requests = requestUrls.map(url => PriceProviderBase.makeRequest(url, {timeout: 60 * 1000}))
     const responses = await Promise.all(requests)
-    const priceData = {}
+
+    //first pass: collect raw BigInt rates (PLN-per-currency scaled to 14 dec)
+    const rawRates = {}
     for (let i = 0; i < responses.length; i++) {
         const response = responses[i]
         if (!response?.data?.length) {
             throw new Error('Failed to get data from nbp')
         }
-        if (i !== 2) { //second request is for gold rate
+        if (i !== 2) { //third request is the gold price
             const rates = response.data[0].rates
-            rates.reduce((acc, cRate) => {
-                acc[cRate.code] = new PriceData({
-                    price: cRate.mid,
-                    source: NBPName,
-                    ts: 0
-                })
-                return acc
-            }, priceData)
+            for (const cRate of rates) {
+                rawRates[cRate.code] = priceToBigInt(cRate.mid)
+            }
         } else {
+            //gold rate: NBP returns PLN per gram; multiply by 31.1034768 g/ozt to get PLN per troy ounce
             const goldRate = response.data[0]
-            priceData.XAU = new PriceData({
-                price: goldRate.cena * 31.1034768, //convert to ozt
-                source: NBPName,
-                ts: 0
-            })
+            rawRates.XAU = priceToBigInt(goldRate.cena * 31.1034768)
         }
     }
-    if (!priceData.USD)
+    if (!rawRates.USD)
         throw new Error('USD rate not found')
 
-    const usdPrice = priceData.USD.price
-    delete priceData.USD //remove USD rate
-    //convert all rates to USD
-    for (const symbol of Object.keys(priceData)) {
-        priceData[symbol].price = calcCrossPrice(usdPrice, priceData[symbol].price)
-    }
-    //add PLN rate
-    priceData.PLN = new PriceData({
-        price: 0n,
-        source: NBPName,
-        ts: 0
-    })
-    //calc PLN rate
-    priceData.PLN.price = calcCrossPrice(PRICE_SCALE, usdPrice)
+    const usdPrice = rawRates.USD
+    delete rawRates.USD
 
+    //second pass: convert each rate to USD via cross-price; add PLN
+    const finalRates = {}
+    for (const symbol of Object.keys(rawRates)) {
+        finalRates[symbol] = calcCrossPrice(usdPrice, rawRates[symbol])
+    }
+    //usdPrice is PLN-per-USD here (NBP convention); to express 1 PLN in USD,
+    //divide PRICE_SCALE by usdPrice — i.e., calcCrossPrice with args in this order
+    finalRates.PLN = calcCrossPrice(usdPrice, PRICE_SCALE)
+
+    //third pass: construct PriceData once per symbol
+    const priceData = {}
+    for (const [symbol, price] of Object.entries(finalRates)) {
+        priceData[symbol] = new PriceData({price, source: NBPName, ts: 0})
+    }
     return priceData
 }
 
