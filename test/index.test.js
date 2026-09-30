@@ -5,7 +5,7 @@ const PriceProviderBase = require('../src/providers/price-provider-base')
 const NBPPriceProvider = require('../src/providers/nbp-provider')
 const ECBPriceProvider = require('../src/providers/ecb-provider')
 const ExchangerateApiProvider = require('../src/providers/exchangerate-api-provider')
-const {assets, getTimestamp} = require('./test-utils')
+const {assets} = require('./test-utils')
 
 const proxies = [
     'http://proxy.com:8081',
@@ -16,7 +16,8 @@ describe('index', () => {
 
     const timeframe = 60
     const count = 100
-    const timestamp = getTimestamp() - (timeframe * count)
+    //the nock fixtures below carry 2025-04-01 fixings; request a tick inside their freshness window
+    const timestamp = Math.floor(Date.UTC(2025, 3, 1, 18) / 1000) - (timeframe * count)
 
     afterAll(() => {
         PriceProviderBase.disposeAll()
@@ -32,16 +33,13 @@ describe('index', () => {
             'forexrateapi': {apiKey: 'mock'},
             'fxratesapi': {apiKey: 'mock'}
         }
-        //trigger cache loading
-        new NBPPriceProvider()
-        new ECBPriceProvider()
-        new ExchangerateApiProvider('mock')
-        await new Promise(resolve => setTimeout(resolve, 100))
+        //trigger cache loading and wait for the first load
+        await Promise.all([new NBPPriceProvider(), new ECBPriceProvider(), new ExchangerateApiProvider('mock')].map(p => p.cacheLoaded))
         const provider = new ForexPriceProvider()
         const tradesData = await provider.getPriceData({
             assets,
             baseAsset:'USD',
-            from: timestamp,
+            timestamp,
             period: timeframe,
             count,
             options: {

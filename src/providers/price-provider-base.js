@@ -39,18 +39,40 @@ const cache = new Map()
 const timeoutHandles = new Map()
 const disposedProviders = new Set()
 
-function setCacheData(providerName, priceData, timestamp) {
-    if (!providerName || !priceData || typeof timestamp !== 'number' || timestamp < 0)
+//a fixing older than this, relative to the requested tick, is withheld so a frozen upstream shows as "no data"
+const defaultMaxAge = 5 * 24 * 60 * 60 * 1000
+
+/**
+ * @param {string} providerName - provider name
+ * @param {Object.<string, PriceData>} prices - prices keyed by symbol
+ * @param {number} timestamp - normalised worker timestamp the snapshot belongs to
+ * @param {number} fixingDate - upstream fixing date in milliseconds, 0 before the first load
+ */
+function setCacheData(providerName, prices, timestamp, fixingDate) {
+    if (!providerName || !prices || typeof timestamp !== 'number' || timestamp < 0 || !Number.isFinite(fixingDate) || fixingDate < 0)
         throw new Error('Invalid parameters for setCacheData')
-    cache.set(providerName, {priceData, timestamp})
+    cache.set(providerName, {prices, timestamp, fixingDate})
 }
 
-function tryGetCachedData(providerName, timestamp) {
+/**
+ * @param {string} providerName - provider name
+ * @param {number} timestamp - requested tick in seconds
+ * @param {number} maxAge - maximum fixing age in milliseconds
+ * @returns {Object.<string, PriceData>|undefined} prices re-stamped with the tick, an empty map when stale or not loaded yet, undefined when the provider has no cache
+ */
+function tryGetCachedData(providerName, timestamp, maxAge) {
     const cachedData = cache.get(providerName)
     if (!cachedData)
         return
+    if (!cachedData.fixingDate)
+        return {}
+    const age = timestamp * 1000 - cachedData.fixingDate
+    if (age > maxAge) {
+        console.debug({msg: 'Fixing is too old for the requested tick', provider: providerName, fixingDate: new Date(cachedData.fixingDate).toISOString(), timestamp, maxAge})
+        return {}
+    }
     //clone and update timestamp
-    return Object.entries(cachedData?.priceData || {}).reduce((acc, [symbol, priceData]) => {
+    return Object.entries(cachedData.prices).reduce((acc, [symbol, priceData]) => {
         acc[symbol] = new PriceData({
             price: priceData.volume,
             source: priceData.source,
@@ -67,7 +89,7 @@ const syncDelay = 5 * 1000
 /**
  * Run a worker function periodically to load price data and cache it.
  * @param {string} providerName - Name of the provider
- * @param {Function} workerFn - Function to run periodically to load price data
+ * @param {Function} workerFn - resolves to {prices, fixingDate}
  * @param {string} api - API key for the provider
  * @param {string} secret - Secret key for the provider
  * @param {number} [interval] - Timeout in milliseconds for the worker function. Defaults to 1 hour.
@@ -87,15 +109,15 @@ async function runWorker(providerName, workerFn, api, secret, interval = 60 * 60
             timeout = Math.max(normalizedTs + interval + syncDelay - Date.now(), 1000)
             return //data already cached for this timestamp
         }
-        const priceData = await workerFn(api, secret)
+        const {prices, fixingDate} = await workerFn(api, secret)
         if (disposedProviders.has(providerName))
             return //disposed during fetch
-        console.debug({msg: 'Cache worker completed', provider: providerName})
+        console.debug({msg: 'Cache worker completed', provider: providerName, fixingDate: new Date(fixingDate).toISOString()})
         //add to cache
-        setCacheData(providerName, priceData, normalizedTs)
+        setCacheData(providerName, prices, normalizedTs, fixingDate)
         timeout = Math.max(normalizedTs + interval + syncDelay - Date.now(), 1000)
     } catch (err) {
-        console.error({msg: 'Error getting trade data', provider: providerName, err})
+        console.error({msg: 'Error getting trade data', provider: providerName, error: err.message})
         timeout = 60 * 1000 //retry in 1 minute
     } finally {
         if (!disposedProviders.has(providerName)) {
@@ -162,7 +184,7 @@ class PriceProviderBase {
      * @param {string} name - Name of the provider
      * @param {string} apiKey - API key for the provider
      * @param {string} secret - Secret key for the provider
-     * @param {{loadPriceDataFn: Function, interval: [number]}} [cacheWorkerOptions] - Optional cache worker for background tasks
+     * @param {{loadPriceDataFn: Function, interval: number, maxAge: number}} [cacheWorkerOptions] - cache worker: loader resolving to {prices, fixingDate}, refresh interval, maximum fixing age
      */
     constructor(name, apiKey, secret, cacheWorkerOptions) {
         if (this.constructor === PriceProviderBase)
@@ -170,15 +192,18 @@ class PriceProviderBase {
         this.name = name
         this.apiKey = apiKey
         this.secret = secret
+        this.__maxAge = cacheWorkerOptions?.maxAge ?? defaultMaxAge
+        this.cacheLoaded = Promise.resolve()
         if (cacheWorkerOptions) {
             if (cache.has(this.name) && !disposedProviders.has(this.name))
                 return //worker already running
             //clear any prior disposed state so the worker restarts on re-construction
             disposedProviders.delete(this.name)
             //initialize cache
-            setCacheData(this.name, {}, 0)
-            //run worker to load price data
-            runWorker(this.name, cacheWorkerOptions.loadPriceDataFn, this.apiKey, this.secret, cacheWorkerOptions.interval)
+            setCacheData(this.name, {}, 0, 0)
+            //run worker to load price data; the promise settles after the first attempt
+            const {loadPriceDataFn, interval} = cacheWorkerOptions
+            this.cacheLoaded = runWorker(this.name, loadPriceDataFn, this.apiKey, this.secret, interval)
         }
     }
 
@@ -289,6 +314,19 @@ class PriceProviderBase {
     static maxDeadline = maxDeadline
 
     /**
+     * Maximum age of a cached fixing relative to the requested tick, in milliseconds, unless the provider overrides it.
+     * @type {number}
+     */
+    static defaultMaxAge = defaultMaxAge
+
+    /**
+     * Settles after the first cache load attempt of the instance that started the worker; an instance created
+     * while the worker is already running gets an already-resolved promise.
+     * @type {Promise<void>}
+     */
+    cacheLoaded
+
+    /**
      * @type {string}
      * @readonly
      */
@@ -319,9 +357,9 @@ class PriceProviderBase {
      * @returns {Promise<Object.<string, PriceData>[]|null>} Returns PriceData array for current timestamp
      */
     getTradesData(timestamp, timeout = 3000) {
-        if (typeof timestamp !== 'number' || timestamp <= 0)
+        if (!Number.isFinite(timestamp) || timestamp <= 0)
             throw new Error('Invalid timestamp')
-        const priceData = tryGetCachedData(this.name, timestamp, this.apiKey, this.secret)
+        const priceData = tryGetCachedData(this.name, timestamp, this.__maxAge)
         if (priceData)
             return Promise.resolve(priceData)
         return this.__getTradeData(timestamp, timeout)

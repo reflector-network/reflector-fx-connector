@@ -14,12 +14,15 @@ async function loadData() {
 
     //first pass: collect raw BigInt rates (PLN-per-currency scaled to 14 dec)
     const rawRates = {}
+    let fixingDate = null
     for (let i = 0; i < responses.length; i++) {
         const response = responses[i]
         if (!response?.data?.length) {
             throw new Error('Failed to get data from nbp')
         }
         if (i !== 2) { //third request is the gold price
+            if (i === 0) //table A carries the USD anchor and is published every business day
+                fixingDate = Date.parse(`${response.data[0].effectiveDate}T00:00:00Z`)
             const rates = response.data[0].rates
             for (const cRate of rates) {
                 rawRates[cRate.code] = priceToBigInt(cRate.mid)
@@ -30,6 +33,8 @@ async function loadData() {
             rawRates.XAU = priceToBigInt(goldRate.cena * 31.1034768)
         }
     }
+    if (!Number.isFinite(fixingDate))
+        throw new Error('Failed to get the fixing date from nbp')
     if (!rawRates.USD)
         throw new Error('USD rate not found')
 
@@ -50,13 +55,13 @@ async function loadData() {
     for (const [symbol, price] of Object.entries(finalRates)) {
         priceData[symbol] = new PriceData({price, source: NBPName, ts: 0})
     }
-    return priceData
+    return {prices: priceData, fixingDate}
 }
 
 //Polish National Bank
 class NBPPriceProvider extends PriceProviderBase {
     constructor(apiKey, secret) {
-        super(NBPName, apiKey, secret, {loadPriceDataFn: loadData})
+        super(NBPName, apiKey, secret, {loadPriceDataFn: loadData, maxAge: 5 * 24 * 60 * 60 * 1000})
     }
 }
 
