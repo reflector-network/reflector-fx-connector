@@ -3,13 +3,28 @@ const {priceToBigInt} = PriceData
 const {calcCrossPrice, PRICE_SCALE} = require('../utils')
 const PriceProviderBase = require('./price-provider-base')
 
+/**
+ * @returns {string} the UTC calendar day 14 days ago, the earliest observation the request should return
+ */
 function getStartPeriod() {
-    const startPeriod = new Date()
-    startPeriod.setDate(new Date().getDate() - 14)
-    return startPeriod.toISOString().split('T')[0] //current date - 14 days
+    const startPeriod = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000)
+    return startPeriod.toISOString().split('T')[0]
 }
 
 const ECB_NAME = 'ecb'
+
+/**
+ * @param {object} data - ECB jsondata payload
+ * @param {string} observKey - observation index used by the series
+ * @returns {number} fixing date in milliseconds
+ */
+function getFixingDate(data, observKey) {
+    const timePeriod = data?.structure?.dimensions?.observation?.find(d => d.id === 'TIME_PERIOD')?.values?.[Number(observKey)]?.id
+    const fixingDate = Date.parse(timePeriod ? `${timePeriod}T00:00:00Z` : data?.header?.prepared)
+    if (!Number.isFinite(fixingDate))
+        throw new Error('Failed to get the fixing date from ecb')
+    return fixingDate
+}
 
 async function loadData() {
     const url = `https://data-api.ecb.europa.eu/service/data/EXR/D..EUR.SP00.A?format=jsondata&detail=dataonly&lastNObservations=1&includeHistory=false&startPeriod=${getStartPeriod()}`
@@ -24,16 +39,24 @@ async function loadData() {
     if (!prices)
         throw new Error('Failed to get data from ecb')
 
-    //first pass: collect raw BigInt rates (currency-per-EUR scaled to 14 dec)
+    //first pass: collect raw BigInt rates (currency-per-EUR scaled to 14 dec); a currency without a series is skipped
     const rawRates = {}
+    let usdObservKey = null
     for (let i = 0; i < currencies.length; i++) {
         const currency = currencies[i]
         const observations = prices[`0:${i}:0:0:0`]?.observations
-        const observKey = Object.keys(observations)?.[0]
+        if (!observations)
+            continue
+        const observKey = Object.keys(observations)[0]
+        if (observKey === undefined)
+            continue
+        if (currency.id === 'USD')
+            usdObservKey = observKey
         rawRates[currency.id] = priceToBigInt(observations[observKey]?.[0] ?? 0)
     }
     if (!rawRates.USD)
         throw new Error('USD rate not found')
+    const fixingDate = getFixingDate(data, usdObservKey)
 
     const usdPrice = rawRates.USD
     delete rawRates.USD
@@ -50,14 +73,14 @@ async function loadData() {
     for (const [symbol, price] of Object.entries(finalRates)) {
         priceData[symbol] = new PriceData({price, source: ECB_NAME, ts: 0})
     }
-    return priceData
+    return {prices: priceData, fixingDate}
 }
 
 
 //Europe Central Bank
 class ECBPriceProvider extends PriceProviderBase {
     constructor(apiKey, secret) {
-        super(ECB_NAME, apiKey, secret, {loadPriceDataFn: loadData})
+        super(ECB_NAME, apiKey, secret, {loadPriceDataFn: loadData, maxAge: 5 * 24 * 60 * 60 * 1000})
     }
 }
 

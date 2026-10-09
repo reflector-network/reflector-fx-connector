@@ -1,15 +1,16 @@
 /*eslint-disable no-undef */
-const ECBPriceProvider = require('../src/providers/ecb-provider')
+const NBPPriceProvider = require('../src/providers/nbp-provider')
 const {getPriceTest} = require('./test-utils')
 
-const provider = new ECBPriceProvider()
-
+//live network test against api.nbp.pl
 describe('NBPPriceProvider', () => {
-    it('get price', async () => {
-        await getPriceTest(provider, 'USD', 5)
-    })
+    const provider = new NBPPriceProvider()
 
-    //it('get price EUR', async () => {
-    //await getPriceTest(provider, 'EUR', 5)
-    //})
+    //stop the cache worker so jest can exit
+    afterAll(() => provider.dispose())
+
+    it('get price', async () => {
+        await provider.cacheLoaded
+        await getPriceTest(provider, 'EUR', 5)
+    })
 })

@@ -5,7 +5,8 @@ const PriceProviderBase = require('../src/providers/price-provider-base')
 const NBPPriceProvider = require('../src/providers/nbp-provider')
 const ECBPriceProvider = require('../src/providers/ecb-provider')
 const ExchangerateApiProvider = require('../src/providers/exchangerate-api-provider')
-const {assets, getTimestamp} = require('./test-utils')
+const RequestError = require('../src/providers/request-error')
+const {assets} = require('./test-utils')
 
 const proxies = [
     'http://proxy.com:8081',
@@ -16,7 +17,8 @@ describe('index', () => {
 
     const timeframe = 60
     const count = 100
-    const timestamp = getTimestamp() - (timeframe * count)
+    //the nock fixtures below carry 2025-04-01 fixings; request a tick inside their freshness window
+    const timestamp = Math.floor(Date.UTC(2025, 3, 1, 18) / 1000) - (timeframe * count)
 
     afterAll(() => {
         PriceProviderBase.disposeAll()
@@ -32,11 +34,8 @@ describe('index', () => {
             'forexrateapi': {apiKey: 'mock'},
             'fxratesapi': {apiKey: 'mock'}
         }
-        //trigger cache loading
-        new NBPPriceProvider()
-        new ECBPriceProvider()
-        new ExchangerateApiProvider('mock')
-        await new Promise(resolve => setTimeout(resolve, 100))
+        //trigger cache loading and wait for the first load
+        await Promise.all([new NBPPriceProvider(), new ECBPriceProvider(), new ExchangerateApiProvider('mock')].map(p => p.cacheLoaded))
         const provider = new ForexPriceProvider()
         const tradesData = await provider.getPriceData({
             assets,
@@ -64,6 +63,16 @@ describe('index', () => {
         provider.setGateway(null)
         expect(PriceProviderBase.gatewayUrls).toBeNull()
     }, 30000)
+
+
+    it('accepts the node\'s `from` and rejects a missing timestamp', async () => {
+        const provider = new ForexPriceProvider()
+        const withFrom = await provider.getPriceData({assets: ['EUR'], baseAsset: 'USD', from: timestamp, period: 60, count: 1, options: {sources: {nbp: {}}}})
+        expect(withFrom).toHaveLength(1)
+        expect(withFrom[0]).toHaveLength(1)
+        await expect(provider.getPriceData({assets: ['EUR'], baseAsset: 'USD', period: 60, count: 1, options: {sources: {nbp: {}}}}))
+            .rejects.toThrow('Invalid timestamp')
+    })
 
 
     beforeAll(() => {
@@ -129,5 +138,56 @@ describe('index', () => {
             .persist()
             .get(() => true)
             .reply(200, [{"data":"2025-04-01","cena":387.01}])
+    })
+})
+
+describe('fetchTradesData retry classification', () => {
+    const retryable = () => new RequestError('upstream.example', {status: 503})
+    const deterministic = () => new RequestError('upstream.example', {status: 404})
+    let warn
+
+    beforeEach(() => {
+        warn = jest.spyOn(console, 'warn').mockImplementation(() => {})
+    })
+
+    afterEach(() => {
+        warn.mockRestore()
+    })
+
+    test('retries a retryable failure with back-off and returns the eventual data', async () => {
+        const getTradesData = jest.fn().mockRejectedValueOnce(retryable()).mockResolvedValueOnce({BTC: 'data'})
+        const start = Date.now()
+        const result = await ForexPriceProvider.fetchTradesData({name: 'p', getTradesData}, 1, 100)
+        expect(result).toEqual({BTC: 'data'})
+        expect(getTradesData).toHaveBeenCalledTimes(2)
+        expect(Date.now() - start).toBeGreaterThanOrEqual(150)
+        expect(warn).not.toHaveBeenCalled()
+    })
+
+    test('does not retry a deterministic failure', async () => {
+        const getTradesData = jest.fn().mockRejectedValue(deterministic())
+        expect(await ForexPriceProvider.fetchTradesData({name: 'p', getTradesData}, 1, 100)).toEqual([])
+        expect(getTradesData).toHaveBeenCalledTimes(1)
+        expect(warn).toHaveBeenCalledTimes(1)
+    })
+
+    test('does not retry a provider bug', async () => {
+        const getTradesData = jest.fn().mockRejectedValue(new TypeError('boom'))
+        expect(await ForexPriceProvider.fetchTradesData({name: 'p', getTradesData}, 1, 100)).toEqual([])
+        expect(getTradesData).toHaveBeenCalledTimes(1)
+    })
+
+    test('gives up after three retryable failures', async () => {
+        const getTradesData = jest.fn().mockRejectedValue(retryable())
+        expect(await ForexPriceProvider.fetchTradesData({name: 'p', getTradesData}, 1, 100)).toEqual([])
+        expect(getTradesData).toHaveBeenCalledTimes(3)
+        expect(warn.mock.calls[0][0].errors).toHaveLength(3)
+    })
+
+    test('treats a null result as no data without retrying', async () => {
+        const getTradesData = jest.fn().mockResolvedValue(null)
+        expect(await ForexPriceProvider.fetchTradesData({name: 'p', getTradesData}, 1, 100)).toEqual([])
+        expect(getTradesData).toHaveBeenCalledTimes(1)
+        expect(warn).not.toHaveBeenCalled()
     })
 })

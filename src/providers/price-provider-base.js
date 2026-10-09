@@ -4,17 +4,33 @@ const http = require('http')
 const {default: axios} = require('axios')
 const PriceData = require('../models/price-data')
 const {normalizeTimestamp} = require('../utils')
+const RequestError = require('./request-error')
 
+//egress limits shared by every request: a total deadline, a body cap, no redirects
+const maxDeadline = 10000
+const maxBodyBytes = 5 * 1024 * 1024
 const defaultAgentOptions = {keepAlive: true, maxSockets: 50, noDelay: true}
+
+//only a 2xx is a success; used for both the client defaults and the per-request options so a provider cannot loosen it
+const acceptedStatus = status => status >= 200 && status < 300
 
 const requestedUrls = new Map()
 
-const httpAgent = new http.Agent(defaultAgentOptions)
-axios.defaults.httpAgent = httpAgent
+//a dedicated client, so the process-global axios defaults stay untouched and no other package can undo the limits
+const client = axios.create({
+    httpAgent: new http.Agent(defaultAgentOptions),
+    httpsAgent: new https.Agent(defaultAgentOptions),
+    maxRedirects: 0,
+    maxContentLength: maxBodyBytes,
+    maxBodyLength: maxBodyBytes,
+    validateStatus: acceptedStatus
+})
 
-const httpsAgent = new https.Agent(defaultAgentOptions)
-axios.defaults.httpsAgent = httpsAgent
-
+/**
+ * @param {number} index - current index
+ * @param {number} length - list length
+ * @returns {number}
+ */
 function getRotatedIndex(index, length) {
     return (index + 1) % length
 }
@@ -23,18 +39,40 @@ const cache = new Map()
 const timeoutHandles = new Map()
 const disposedProviders = new Set()
 
-function setCacheData(providerName, priceData, timestamp) {
-    if (!providerName || !priceData || typeof timestamp !== 'number' || timestamp < 0)
+//a fixing older than this, relative to the requested tick, is withheld so a frozen upstream shows as "no data"
+const defaultMaxAge = 5 * 24 * 60 * 60 * 1000
+
+/**
+ * @param {string} providerName - provider name
+ * @param {Object.<string, PriceData>} prices - prices keyed by symbol
+ * @param {number} timestamp - normalised worker timestamp the snapshot belongs to
+ * @param {number} fixingDate - upstream fixing date in milliseconds, 0 before the first load
+ */
+function setCacheData(providerName, prices, timestamp, fixingDate) {
+    if (!providerName || !prices || typeof timestamp !== 'number' || timestamp < 0 || !Number.isFinite(fixingDate) || fixingDate < 0)
         throw new Error('Invalid parameters for setCacheData')
-    cache.set(providerName, {priceData, timestamp})
+    cache.set(providerName, {prices, timestamp, fixingDate})
 }
 
-function tryGetCachedData(providerName, timestamp) {
+/**
+ * @param {string} providerName - provider name
+ * @param {number} timestamp - requested tick in seconds
+ * @param {number} maxAge - maximum fixing age in milliseconds
+ * @returns {Object.<string, PriceData>|undefined} prices re-stamped with the tick, an empty map when stale or not loaded yet, undefined when the provider has no cache
+ */
+function tryGetCachedData(providerName, timestamp, maxAge) {
     const cachedData = cache.get(providerName)
     if (!cachedData)
         return
+    if (!cachedData.fixingDate)
+        return {}
+    const age = timestamp * 1000 - cachedData.fixingDate
+    if (age > maxAge) {
+        console.debug({msg: 'Fixing is too old for the requested tick', provider: providerName, fixingDate: new Date(cachedData.fixingDate).toISOString(), timestamp, maxAge})
+        return {}
+    }
     //clone and update timestamp
-    return Object.entries(cachedData?.priceData || {}).reduce((acc, [symbol, priceData]) => {
+    return Object.entries(cachedData.prices).reduce((acc, [symbol, priceData]) => {
         acc[symbol] = new PriceData({
             price: priceData.volume,
             source: priceData.source,
@@ -51,7 +89,7 @@ const syncDelay = 5 * 1000
 /**
  * Run a worker function periodically to load price data and cache it.
  * @param {string} providerName - Name of the provider
- * @param {Function} workerFn - Function to run periodically to load price data
+ * @param {Function} workerFn - resolves to {prices, fixingDate}
  * @param {string} api - API key for the provider
  * @param {string} secret - Secret key for the provider
  * @param {number} [interval] - Timeout in milliseconds for the worker function. Defaults to 1 hour.
@@ -71,15 +109,15 @@ async function runWorker(providerName, workerFn, api, secret, interval = 60 * 60
             timeout = Math.max(normalizedTs + interval + syncDelay - Date.now(), 1000)
             return //data already cached for this timestamp
         }
-        const priceData = await workerFn(api, secret)
+        const {prices, fixingDate} = await workerFn(api, secret)
         if (disposedProviders.has(providerName))
             return //disposed during fetch
-        console.debug({msg: 'Cache worker completed', provider: providerName})
+        console.debug({msg: 'Cache worker completed', provider: providerName, fixingDate: new Date(fixingDate).toISOString()})
         //add to cache
-        setCacheData(providerName, priceData, normalizedTs)
+        setCacheData(providerName, prices, normalizedTs, fixingDate)
         timeout = Math.max(normalizedTs + interval + syncDelay - Date.now(), 1000)
     } catch (err) {
-        console.error({msg: 'Error getting trade data', provider: providerName, err})
+        console.error({msg: 'Error getting trade data', provider: providerName, error: err.message})
         timeout = 60 * 1000 //retry in 1 minute
     } finally {
         if (!disposedProviders.has(providerName)) {
@@ -91,12 +129,62 @@ async function runWorker(providerName, workerFn, api, secret, interval = 60 * 60
     }
 }
 
+/**
+ * @param {string} [gatewayUrl] - gateway url, or undefined for a direct request
+ * @returns {string|null} gateway host for logs; never throws and never carries credentials
+ */
+function gatewayHost(gatewayUrl) {
+    if (!gatewayUrl)
+        return null
+    try {
+        return new URL(gatewayUrl).host
+    } catch (e) {
+        return 'invalid-gateway'
+    }
+}
+
+/**
+ * Judges one entry of the operator's configured list. The direct route is never judged here: it is not a configured
+ * entry, `setGateway` injects it after this filter has run. An `undefined` that arrived from the caller - a literal
+ * `[undefined]`, or an array hole the spread turns into one - is therefore rejected like any other non-string
+ * instead of being read as the opt-in local host and sending the request direct.
+ * @param {any} gatewayUrl - configured gateway entry
+ * @returns {string|null} why the entry cannot be used, or null when it can; the entry itself is never echoed back
+ */
+function gatewayRejectionReason(gatewayUrl) {
+    if (typeof gatewayUrl !== 'string') //undefined and null included: neither of them names a route
+        return `not-a-string (${typeof gatewayUrl})`
+    let parsed
+    try {
+        parsed = new URL(gatewayUrl)
+    } catch (e) {
+        return 'unparseable'
+    }
+    return parsed.host ? null : 'no-host'
+}
+
+/**
+ * @param {any} gatewayUrl - configured gateway entry
+ * @returns {boolean} true when the entry is usable, so an unusable one never reaches the gateway list
+ */
+function isUsableGateway(gatewayUrl) {
+    return gatewayRejectionReason(gatewayUrl) === null
+}
+
+/**
+ * @returns {boolean} true when gateways were configured and none of them is usable: there is no route left, and a
+ * direct request would reveal the node ip to the upstream, which is the one thing the gateways exist to prevent
+ */
+function hasNoUsableGateway() {
+    return Array.isArray(PriceProviderBase.gatewayUrls) && PriceProviderBase.gatewayUrls.length === 0
+}
+
 class PriceProviderBase {
     /**
      * @param {string} name - Name of the provider
      * @param {string} apiKey - API key for the provider
      * @param {string} secret - Secret key for the provider
-     * @param {{loadPriceDataFn: Function, interval: [number]}} [cacheWorkerOptions] - Optional cache worker for background tasks
+     * @param {{loadPriceDataFn: Function, interval: number, maxAge: number}} [cacheWorkerOptions] - cache worker: loader resolving to {prices, fixingDate}, refresh interval, maximum fixing age
      */
     constructor(name, apiKey, secret, cacheWorkerOptions) {
         if (this.constructor === PriceProviderBase)
@@ -104,15 +192,18 @@ class PriceProviderBase {
         this.name = name
         this.apiKey = apiKey
         this.secret = secret
+        this.__maxAge = cacheWorkerOptions?.maxAge ?? defaultMaxAge
+        this.cacheLoaded = Promise.resolve()
         if (cacheWorkerOptions) {
             if (cache.has(this.name) && !disposedProviders.has(this.name))
                 return //worker already running
             //clear any prior disposed state so the worker restarts on re-construction
             disposedProviders.delete(this.name)
             //initialize cache
-            setCacheData(this.name, {}, 0)
-            //run worker to load price data
-            runWorker(this.name, cacheWorkerOptions.loadPriceDataFn, this.apiKey, this.secret, cacheWorkerOptions.interval)
+            setCacheData(this.name, {}, 0, 0)
+            //run worker to load price data; the promise settles after the first attempt
+            const {loadPriceDataFn, interval} = cacheWorkerOptions
+            this.cacheLoaded = runWorker(this.name, loadPriceDataFn, this.apiKey, this.secret, interval)
         }
     }
 
@@ -140,6 +231,18 @@ class PriceProviderBase {
         timeoutHandles.clear()
     }
 
+    /**
+     * Records one of three states in `gatewayUrls`, and only the first of them may issue a direct request.
+     * `null` - no gateways configured, so direct is the only route.
+     * A non-empty list - at least one usable gateway: every request goes through a gateway, and direct is used only
+     * when `useCurrentProvider` put it in the list and the rotation picks that slot.
+     * An empty list - gateways configured and none of them usable: no route at all, so requests fail instead of
+     * revealing the node ip to the upstream.
+     * @param {string|string[]} gatewayConnectionSting - configured gateway urls
+     * @param {string} validationKey - value of the x-gateway-validation header
+     * @param {boolean} [useCurrentProvider] - route through the local host as well, as one explicitly chosen route;
+     * this is the only thing that puts the direct route in the list
+     */
     static setGateway(gatewayConnectionSting, validationKey, useCurrentProvider) {
         if (!gatewayConnectionSting) {
             PriceProviderBase.gatewayUrls = null
@@ -150,15 +253,34 @@ class PriceProviderBase {
         if (!Array.isArray(gatewayConnectionSting))
             gatewayConnectionSting = [gatewayConnectionSting]
 
-        const gateways = gatewayConnectionSting
-
-        if (gateways.length === 0) {
+        const configured = [...gatewayConnectionSting]
+        //an empty list is "no gateways configured", not a configuration that failed: reflector-node synthesises
+        //{urls: []} the first time a node boots without a gateways.json (src/domain/settings-manager.js:92-96) and
+        //hands that straight to setGateway, so fail-closing here would leave every freshly provisioned node unable
+        //to fetch any data at all
+        if (configured.length === 0) {
             PriceProviderBase.gatewayUrls = null
             PriceProviderBase.validationKey = null
             return
         }
+        //an unusable entry would throw out of every log line, so drop it here and never name it
+        const gateways = configured.filter(isUsableGateway)
 
-        if (useCurrentProvider) //add current server
+        if (gateways.length === 0) {
+            //fail closed: going direct would expose the node ip, which is the one thing the gateways exist to prevent
+            const reasons = configured.map((gateway, index) => `#${index}: ${gatewayRejectionReason(gateway)}`)
+            console.error({msg: 'Every configured gateway is unusable; requests will fail instead of going direct', configured: configured.length, reasons})
+            PriceProviderBase.gatewayUrls = []
+            PriceProviderBase.validationKey = null
+            return
+        }
+
+        if (gateways.length !== configured.length)
+            console.warn({msg: 'Ignored unparseable gateway urls', ignored: configured.length - gateways.length, kept: gateways.length})
+
+        //the only undefined that can reach the list: it is added after the configured entries were validated and
+        //after the fail-closed return, so a caller-supplied undefined can never pass for the opt-in local host
+        if (useCurrentProvider) //add current server as one more chosen route, never as a fall-back
             gateways.unshift(undefined)
 
         PriceProviderBase.gatewayUrls = gateways
@@ -166,22 +288,43 @@ class PriceProviderBase {
     }
 
     static getGatewayUrl(url) {
-        if (!PriceProviderBase.gatewayUrls) //no proxies
+        const gateways = PriceProviderBase.gatewayUrls
+        //an empty list is the fail-closed state; makeRequest refuses the request before it gets here
+        if (!gateways || gateways.length === 0) //no proxies
             return undefined
 
-        if (PriceProviderBase.gatewayUrls.length === 1) //single gateway, no need to rotate
-            return PriceProviderBase.gatewayUrls[0]
+        if (gateways.length === 1) //single gateway, no need to rotate
+            return gateways[0]
 
         const host = new URL(url).host
         if (!requestedUrls.has(host)) {//first request to the host. Assign first gateway
             requestedUrls.set(host, 0)
-            return PriceProviderBase.gatewayUrls[0]
+            return gateways[0]
         }
         const index = requestedUrls.get(host)
-        const newIndex = getRotatedIndex(index, PriceProviderBase.gatewayUrls.length)
+        const newIndex = getRotatedIndex(index, gateways.length)
         requestedUrls.set(host, newIndex)
-        return PriceProviderBase.gatewayUrls[newIndex]
+        return gateways[newIndex]
     }
+
+    /**
+     * Total deadline applied to every request, in milliseconds; a provider's own timeout is capped at it.
+     * @type {number}
+     */
+    static maxDeadline = maxDeadline
+
+    /**
+     * Maximum age of a cached fixing relative to the requested tick, in milliseconds, unless the provider overrides it.
+     * @type {number}
+     */
+    static defaultMaxAge = defaultMaxAge
+
+    /**
+     * Settles after the first cache load attempt of the instance that started the worker; an instance created
+     * while the worker is already running gets an already-resolved promise.
+     * @type {Promise<void>}
+     */
+    cacheLoaded
 
     /**
      * @type {string}
@@ -214,58 +357,76 @@ class PriceProviderBase {
      * @returns {Promise<Object.<string, PriceData>[]|null>} Returns PriceData array for current timestamp
      */
     getTradesData(timestamp, timeout = 3000) {
-        if (typeof timestamp !== 'number' || timestamp <= 0)
+        if (!Number.isFinite(timestamp) || timestamp <= 0)
             throw new Error('Invalid timestamp')
-        const priceData = tryGetCachedData(this.name, timestamp, this.apiKey, this.secret)
+        const priceData = tryGetCachedData(this.name, timestamp, this.__maxAge)
         if (priceData)
             return Promise.resolve(priceData)
         return this.__getTradeData(timestamp, timeout)
     }
 
     /**
-     * @param {number} timestamp
-     * @param {number} timeout
+     * @param {number} timestamp - timestamp in seconds
+     * @param {number} timeout - request timeout in milliseconds
      * @returns {Promise<Object.<string, PriceData>[]|null>}
      * @abstract
      * @protected
      */
+    //eslint-disable-next-line no-unused-vars
     __getTradeData(timestamp, timeout) {
         throw new Error('Not implemented')
     }
 
     /**
+     * Issues one request over the rotated gateway, or directly when no gateways are configured. It never retries a
+     * failed gateway request directly: that would show the node's ip to the upstream, so a failure here means the
+     * tick loses this provider's data.
      * @param {string} url - request url
-     * @param {any} [options] - request options
-     * @returns {Promise<any>}
+     * @param {any} [options] - axios request options; `timeout` is capped at `maxDeadline`
+     * @returns {Promise<any>} axios response with a 2xx status
+     * @throws {RequestError} on any transport or HTTP failure, or `ERR_NO_GATEWAY` when the gateways are configured
+     * and none of them is usable
      * @static
      */
     static async makeRequest(url, options = {}) {
+        let targetHost
+        try {
+            targetHost = new URL(url).host
+        } catch (e) {
+            throw new RequestError('invalid-url', {code: 'ERR_INVALID_URL'})
+        }
+        if (hasNoUsableGateway()) //fail closed before any transport call; setGateway already logged why
+            throw new RequestError(targetHost, {code: RequestError.noRouteCode})
+        const requested = Number(options?.timeout)
+        const deadline = Math.min(requested > 0 ? requested : maxDeadline, maxDeadline)
         const gatewayUrl = PriceProviderBase.getGatewayUrl(url)
+        let headers = options?.headers
         if (gatewayUrl) {
             url = `${gatewayUrl}/gateway?url=${encodeURIComponent(url)}`
-            //add validation key
-            if (!options)
-                options = {}
-            options.headers = {
-                ...options.headers,
-                'x-gateway-validation': PriceProviderBase.validationKey
-            }
+            headers = {...headers, 'x-gateway-validation': PriceProviderBase.validationKey}
         }
         const requestOptions = {
             ...options,
-            url
+            headers,
+            url,
+            timeout: deadline,
+            signal: options?.signal ? AbortSignal.any([AbortSignal.timeout(deadline), options.signal]) : AbortSignal.timeout(deadline),
+            maxRedirects: 0,
+            maxContentLength: maxBodyBytes,
+            maxBodyLength: maxBodyBytes,
+            validateStatus: acceptedStatus
         }
+        const start = Date.now()
         try {
-            const start = Date.now()
-            const response = await axios.request(requestOptions)
-            const time = Date.now() - start
-            requestedUrls.delete(url)
-            if (time > 1000)
-                console.debug({msg: 'Slow request', url, durationMs: time, gateway: gatewayUrl ?? null})
+            const response = await client.request(requestOptions)
+            const durationMs = Date.now() - start
+            if (durationMs > 1000)
+                console.debug({msg: 'Slow request', host: targetHost, gateway: gatewayHost(gatewayUrl), durationMs})
             return response
         } catch (err) {
-            console.warn({msg: 'Request failed', url, gateway: gatewayUrl ?? null, err})
-            return null
+            const error = new RequestError(targetHost, {status: err.response?.status, code: err.code})
+            console.warn({msg: 'Request failed', host: targetHost, gateway: gatewayHost(gatewayUrl), status: error.status, code: error.code, durationMs: Date.now() - start})
+            throw error
         }
     }
 }
